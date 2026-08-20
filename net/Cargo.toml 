@@ -1,0 +1,13 @@
+[package]
+name = "skhoron-vbf-net"
+description = "Skhoron VBF — сетевой слой: DHT peer discovery поверх libp2p"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+skhoron-vbf-core = { path = "../core" }
+libp2p = { workspace = true }
+tokio = { workspace = true }
+thiserror = { workspace = true }
