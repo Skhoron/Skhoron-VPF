@@ -1,0 +1,30 @@
+[package]
+name = "skhoron-vbf-core"
+description = "Skhoron VPN Base Framework — platform-agnostic crypto & framing core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+name = "skhoron_vbf_core"
+crate-type = ["rlib", "staticlib", "cdylib"]
+
+[dependencies]
+chacha20poly1305 = { workspace = true }
+x25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+hkdf = { workspace = true }
+sha2 = { workspace = true }
+argon2 = { workspace = true }
+zeroize = { workspace = true }
+bytes = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+hex = "0.4"
+tokio = { version = "1", features = ["full"] }
+
+[[example]]
+name = "peer"
+path = "examples/peer.rs"
