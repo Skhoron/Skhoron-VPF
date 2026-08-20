@@ -1,0 +1,20 @@
+[package]
+name = "skhoron-vbf-ffi-android"
+description = "Skhoron VBF — тонкий FFI-слой под Android/Kotlin (uniffi)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+skhoron-vbf-core = { path = "../core" }
+
+# uniffi лицензирован под MPL-2.0 — это зависимость, не слияние кода
+# в MIT-ядро. Обсуждено и принято как компромисс (см. README раздел Licensing).
+uniffi = "0.29"
+
+[build-dependencies]
+uniffi = { version = "0.29", features = ["build"] }
