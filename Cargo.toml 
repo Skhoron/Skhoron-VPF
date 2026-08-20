@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = [
+    "core",
+    "net",
+    "ffi-android",
+    "ffi-desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Skhoron/Skhoron-VBF"
+
+[workspace.dependencies]
+chacha20poly1305 = { version = "0.11", features = ["zeroize", "os_rng"] }
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+hkdf = "0.12"
+sha2 = "0.10"
+argon2 = "0.5"
+zeroize = "1.8"
+bytes = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+libp2p = { version = "0.56", features = ["kad", "noise", "tcp", "quic", "yamux", "macros", "tokio"] }
