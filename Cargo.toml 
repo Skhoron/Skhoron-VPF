@@ -3,9 +3,11 @@ resolver = "2"
 members = [
     "core",
     "net",
-    "ffi-android",
-    "ffi-desktop",
 ]
+# ffi-android и ffi-desktop убраны из workspace: в них не было реального
+# экспортируемого API (только TODO-заглушки) — сейчас они добавляли
+# структуру без функциональной ценности. Возврат в workspace — когда
+# появится реальный uniffi/extern "C" API поверх core.
 
 [workspace.package]
 version = "0.1.0"
