@@ -60,6 +60,12 @@ pub struct Frame {
 
 const HEADER_LEN: usize = 1 + 1 + 4; // version + type + length
 
+/// Жёсткий потолок размера кадра — 16 MiB. Не даёт удалённой стороне
+/// заявить произвольную длину (до 4 GiB из u32) и заставить получателя
+/// выделить неограниченный буфер. Значение с запасом под будущие
+/// Standard/Pro-фичи (mixnet-обёртки и т.п.), но не "почти безлимит".
+pub const MAX_FRAME_SIZE: usize = 16 * 1024 * 1024;
+
 impl Frame {
     pub fn new(frame_type: FrameType, payload: Vec<u8>) -> Self {
         Self {
@@ -69,13 +75,21 @@ impl Frame {
         }
     }
 
-    pub fn encode(&self) -> BytesMut {
+    pub fn encode(&self) -> Result<BytesMut, VbfError> {
+        if self.payload.len() > MAX_FRAME_SIZE {
+            return Err(VbfError::MalformedFrame("payload exceeds MAX_FRAME_SIZE"));
+        }
+        // payload.len() гарантированно помещается в u32 после проверки выше —
+        // без этой проверки usize->u32 на 64-бит системах мог молча обрезаться.
+        let len_u32 = u32::try_from(self.payload.len())
+            .map_err(|_| VbfError::MalformedFrame("payload length does not fit in u32"))?;
+
         let mut buf = BytesMut::with_capacity(HEADER_LEN + self.payload.len());
         buf.put_u8(self.version);
         buf.put_u8(self.frame_type.to_u8());
-        buf.put_u32(self.payload.len() as u32);
+        buf.put_u32(len_u32);
         buf.put_slice(&self.payload);
-        buf
+        Ok(buf)
     }
 
     pub fn decode(buf: &mut impl Buf) -> Result<Self, VbfError> {
@@ -92,6 +106,10 @@ impl Frame {
 
         let frame_type = FrameType::from_u8(buf.get_u8());
         let length = buf.get_u32() as usize;
+
+        if length > MAX_FRAME_SIZE {
+            return Err(VbfError::MalformedFrame("declared length exceeds MAX_FRAME_SIZE"));
+        }
 
         if buf.remaining() < length {
             return Err(VbfError::MalformedFrame("payload shorter than declared length"));
@@ -115,10 +133,28 @@ mod tests {
     #[test]
     fn roundtrip() {
         let frame = Frame::new(FrameType::Data, vec![1, 2, 3, 4]);
-        let mut encoded = frame.encode();
+        let mut encoded = frame.encode().unwrap();
         let decoded = Frame::decode(&mut encoded).unwrap();
         assert_eq!(decoded.payload, vec![1, 2, 3, 4]);
         assert_eq!(decoded.version, VBF_VERSION);
+    }
+
+    #[test]
+    fn rejects_oversized_payload_on_encode() {
+        let frame = Frame::new(FrameType::Data, vec![0u8; MAX_FRAME_SIZE + 1]);
+        assert!(frame.encode().is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_declared_length_on_decode() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(VBF_VERSION);
+        buf.put_u8(0x02);
+        buf.put_u32((MAX_FRAME_SIZE + 1) as u32);
+        assert!(matches!(
+            Frame::decode(&mut buf),
+            Err(VbfError::MalformedFrame(_))
+        ));
     }
 
     #[test]
