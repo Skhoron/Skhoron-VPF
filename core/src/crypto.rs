@@ -20,7 +20,11 @@ pub const NONCE_LEN: usize = 24; // XChaCha20 extended nonce
 pub const SALT_LEN: usize = 16;
 
 /// Симметричный ключ. Обнуляется при drop.
-#[derive(Clone)]
+///
+/// Намеренно НЕ Clone: секретный материал не должен иметь возможность
+/// молча размножиться на несколько владельцев (если оригинал уничтожится,
+/// копия пережила бы его до своего отдельного Drop). Если ключ нужен
+/// в нескольких местах — передавайте владение или ссылку, не клонируйте.
 pub struct SymmetricKey([u8; KEY_LEN]);
 
 impl SymmetricKey {
@@ -28,7 +32,10 @@ impl SymmetricKey {
         Self(bytes)
     }
 
-    pub fn as_bytes(&self) -> &[u8; KEY_LEN] {
+    /// Доступ только внутри крейта — наружу (включая FFI) ключ как raw bytes
+    /// не отдаётся, только через операции (aead_encrypt/decrypt), чтобы
+    /// не давать вызывающему коду держать долгоживущую ссылку на секрет.
+    pub(crate) fn as_bytes(&self) -> &[u8; KEY_LEN] {
         &self.0
     }
 }
