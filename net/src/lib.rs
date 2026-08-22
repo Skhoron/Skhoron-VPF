@@ -5,14 +5,27 @@
 //! Kademlia DHT берётся готовым из libp2p (не переписывается с нуля).
 
 use libp2p::kad;
-use libp2p::PeerId;
+use libp2p::{Multiaddr, PeerId};
 
-/// Адрес bootstrap-ноды. Список заполняется конфигом, не хардкодится
-/// в коде — при старте минимум 2-3 ноды в разных юрисдикциях (см. план).
+/// Доверенная bootstrap-нода. `peer_id` обязателен: bootstrap-нода — это
+/// точка входа в сеть, и если не проверять её identity, подключение к
+/// адресу без ожидаемого PeerId открывает подмену bootstrap-узла
+/// (кто угодно, поднявший сервис на этом IP, сойдёт за легитимную ноду).
+/// Если нужен режим без проверки — см. `UntrustedDiscoveryNode` ниже,
+/// он размечен явно как небезопасный, а не спрятан за Option.
 #[derive(Clone, Debug)]
 pub struct BootstrapNode {
-    pub multiaddr: String,
-    pub peer_id: Option<PeerId>,
+    pub multiaddr: Multiaddr,
+    pub peer_id: PeerId,
+}
+
+/// Узел для discovery без проверки identity. Использовать только там,
+/// где риск подмены осознанно принят (например ранний dev-тест сети) —
+/// название типа сознательно кричащее, чтобы это не подключили молча
+/// вместо BootstrapNode.
+#[derive(Clone, Debug)]
+pub struct UntrustedDiscoveryNode {
+    pub multiaddr: Multiaddr,
 }
 
 /// Конфигурация сетевого слоя. Заполняется вызывающей стороной
@@ -20,12 +33,17 @@ pub struct BootstrapNode {
 /// для продакшена не диктует.
 pub struct NetworkConfig {
     pub bootstrap_nodes: Vec<BootstrapNode>,
-    pub listen_addr: String,
+    pub listen_addr: Multiaddr,
 }
 
 /// Заготовка network behaviour для swarm. Реальная сборка (NetworkBehaviour
 /// derive, event loop, транспорт TCP/QUIC) — следующий шаг, сознательно
 /// не реализован здесь, чтобы зафиксировать сначала конфиг-контракт.
+///
+/// TODO(следующий шаг, не забыть при переходе от заготовки к продакшену):
+/// `kad::store::MemoryStore` теряет данные DHT при перезапуске процесса —
+/// нормально для текущей заглушки, но перед реальным использованием нужен
+/// персистентный store (например поверх sled/rocksdb).
 pub struct SkhoronNetworkBehaviour {
     pub kademlia: kad::Behaviour<kad::store::MemoryStore>,
 }
