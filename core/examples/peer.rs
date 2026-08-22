@@ -12,9 +12,9 @@
 use std::env;
 
 use skhoron_vbf_core::framing::{Frame, FrameType};
-use skhoron_vbf_core::handshake::{self, HandshakeMessage, HANDSHAKE_MSG_LEN};
+use skhoron_vbf_core::handshake::{self, HandshakeMessage, PeerAuthenticity, HANDSHAKE_MSG_LEN};
 use skhoron_vbf_core::identity::Identity;
-use skhoron_vbf_core::session::Session;
+use skhoron_vbf_core::session::{OrderingGuarantee, Session};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -70,8 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let peer_identity_pubkey =
         ed25519_dalek::VerifyingKey::from_bytes(&peer_msg.identity_pubkey)?;
 
-    let keys = handshake::finish(state, &peer_msg, &peer_identity_pubkey)?;
-    let mut session = Session::new(keys.tx, keys.rx);
+    let keys = handshake::finish(
+        state,
+        &peer_msg,
+        &peer_identity_pubkey,
+        // Явно TOFU: peer заранее не был известен, pubkey пришёл из этого
+        // же соединения. См. README — защищает от пассивного прослушивания,
+        // не от MITM на этапе первого знакомства.
+        PeerAuthenticity::TrustOnFirstUse,
+    )?;
+    let mut session = Session::new(keys.tx, keys.rx, OrderingGuarantee::StrictInOrderTransport);
 
     println!("Handshake завершён. Канал зашифрован (XChaCha20-Poly1305).");
     println!("Peer Master-ID: {}", hex_encode(&peer_msg.identity_pubkey));
@@ -92,9 +100,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn write_frame(
     writer: &mut tokio::net::tcp::OwnedWriteHalf,
     frame: &Frame,
-) -> std::io::Result<()> {
-    let encoded = frame.encode();
-    writer.write_all(&encoded).await
+) -> Result<(), Box<dyn std::error::Error>> {
+    let encoded = frame.encode()?;
+    writer.write_all(&encoded).await?;
+    Ok(())
 }
 
 async fn read_frame(
@@ -104,6 +113,13 @@ async fn read_frame(
     reader.read_exact(&mut header).await?;
 
     let length = u32::from_be_bytes([header[2], header[3], header[4], header[5]]) as usize;
+    // Проверяем лимит ДО выделения буфера — иначе именно на этом шаге
+    // (не в Frame::decode, а в транспортном чтении) удалённая сторона
+    // могла бы указать длину под 4 GiB и заставить нас выделить память
+    // ещё до того, как Frame::decode успеет её отклонить.
+    if length > skhoron_vbf_core::framing::MAX_FRAME_SIZE {
+        return Err("declared frame length exceeds MAX_FRAME_SIZE".into());
+    }
     let mut payload = vec![0u8; length];
     reader.read_exact(&mut payload).await?;
 
