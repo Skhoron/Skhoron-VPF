@@ -9,25 +9,45 @@
 
 ## Что уже есть (Base) — и реально работает
 
-- `core/crypto.rs` — примитивы (XChaCha20-Poly1305, X25519, Ed25519, HKDF, Argon2id)
-- `core/framing.rs` — TLV framing с полем версии
+- `core/crypto.rs` — примитивы (XChaCha20-Poly1305, X25519, Ed25519, HKDF,
+  Argon2id). `SymmetricKey` не Clone (секрет не должен размножаться), байты
+  доступны только внутри крейта (`pub(crate)`), не через публичный FFI.
+- `core/framing.rs` — TLV framing с полем версии и жёстким `MAX_FRAME_SIZE`
+  (16 MiB) — и на encode, и на decode, включая проверку до аллокации буфера.
 - `core/identity.rs` — Identity / Master-ID = SHA-256(Ed25519 pubkey)
-- `core/handshake.rs` — **рабочий** минимальный handshake: обмен эфемерными
-  X25519-ключами, подписанными Ed25519, детерминированная деривация
-  разнонаправленных сессионных ключей через HKDF
-- `core/session.rs` — **рабочее** шифрование/дешифрование кадров поверх
-  ключей из handshake, monotonic-counter вместо nonce (защита от replay
-  на уровне "строгий порядок", не sliding window)
-- `core/examples/peer.rs` — **живой пример**: два процесса по TCP
-  реально соединяются, делают handshake и обмениваются зашифрованными
-  сообщениями. Запуск:
+- `core/handshake.rs` — минимальный handshake: X25519 + Ed25519, подпись
+  покрывает protocol_id/версию/ephemeral (не просто голый ephemeral pubkey),
+  HKDF на сессионные ключи берёт salt из хэша полного transcript
+  (protocol_id + версия + обе identity + оба ephemeral pubkey) — ключи
+  криптографически привязаны к конкретному контексту рукопожатия, не только
+  к ECDH-секрету. `PeerAuthenticity` заставляет вызывающий код явно
+  указать, TOFU это или проверенный из независимого источника pubkey.
+- `core/session.rs` — шифрование/дешифрование кадров, counter одновременно
+  и в payload, и в AAD (подмена counter рвёт Poly1305-тег напрямую, а не
+  только логическую проверку). `OrderingGuarantee` — явный параметр
+  конструктора, чтобы Session нельзя было случайно взять поверх UDP/QUIC,
+  не отдавая себе отчёт, что strict-order логика там ломается при потере
+  пакета.
+- `core/examples/peer.rs` — живой пример: два процесса по TCP реально
+  соединяются, делают handshake и обмениваются зашифрованными сообщениями.
+  Запуск:
   ```
   cargo run --example peer -- server 127.0.0.1:9000
   cargo run --example peer -- client 127.0.0.1:9000
   ```
-- `net/` — заготовка сетевого слоя на rust-libp2p (Kademlia DHT), пока
-  только конструктор behaviour, без event loop
-- `ffi-android/`, `ffi-desktop/` — тонкие FFI-заглушки, точки расширения
+- `net/` — заготовка на rust-libp2p (Kademlia DHT). `BootstrapNode.peer_id`
+  теперь обязательный (не `Option`) — доверенная bootstrap-нода без
+  проверки identity открывает подмену узла. Есть отдельный явно названный
+  `UntrustedDiscoveryNode` для случаев, где риск осознанно принят.
+  Адреса — типизированный `Multiaddr`, не `String`. `MemoryStore` — известное
+  ограничение текущей заглушки (DHT не переживает рестарт), персистентный
+  store — следующий шаг перед реальным использованием.
+
+## Что было убрано
+
+`ffi-android/` и `ffi-desktop/` убраны из workspace: там были только
+TODO-заглушки без единой экспортируемой функции — то есть структура без
+функциональной ценности. Возврат — когда появится реальный API поверх core.
 
 ## Чего сознательно НЕТ в базе
 
@@ -36,14 +56,16 @@
 - Peer discovery через DHT в handshake-примере — там peer передаётся
   вручную (IP:port), реальный discovery — задача `net/` + форка
 - Sliding-window anti-replay, UDP/QUIC-транспорт — протокольная логика форка
+  (`OrderingGuarantee` сейчас поддерживает только строгий порядок)
 - Обфускация трафика (Hysteria2-style, mixnet) — Standard/Pro тиры
 - Генерация паролей/PIN, UI, конфигурация продакшен bootstrap-нод
 
-Пример нарочно доверяет identity-pubkey, пришедшему в первом сообщении
-(TOFU) — это защищает только от пассивного прослушивания, не от MITM.
-Настоящая защита от MITM требует, чтобы ожидаемый pubkey собеседника
-приходил из независимого источника (DHT, заранее обменянный контакт) —
-это следующий шаг, не входит в голую базу.
+Пример (`peer.rs`) использует `PeerAuthenticity::TrustOnFirstUse` — это
+защищает только от пассивного прослушивания, не от MITM на этапе первого
+знакомства. Настоящая защита требует, чтобы ожидаемый pubkey приходил не
+из этого же соединения, а из независимого источника (DHT, заранее
+обменянный контакт, `PeerAuthenticity::VerifiedOutOfBand`) — это уже
+следующий шаг для форка, не часть голой базы.
 
 ## Принцип
 
@@ -61,20 +83,19 @@ rust-libp2p), не самописные. Баг в примитиве размн
 | Подписи | `ed25519-dalek` | MIT |
 | KDF | `hkdf`, `argon2` | MIT/Apache-2.0 |
 | DHT | `libp2p` (kad) | MIT/Apache-2.0 |
-| Android FFI | `uniffi` | MPL-2.0 (зависимость, не слияние кода) |
 
 Никаких GPL/AGPL-зависимостей в этом репозитории. Если нужен
 AGPL-компонент экосистемы (self-hosted сервисы) — он живёт отдельным
 репозиторием/процессом, общается по сети, не линкуется напрямую.
+FFI (Android/desktop) пока не в этом репозитории — см. "Что было убрано".
 
 ## Структура
 
 ```
 Skhoron-VBF/
-├── core/          crypto, framing, identity — платформонезависимо
+├── core/          crypto, framing, handshake, session, identity — платформонезависимо
+│   └── examples/  peer.rs — живой TCP-пример handshake+шифрования
 ├── net/           libp2p DHT заготовка
-├── ffi-android/   uniffi биндинги (заглушка)
-├── ffi-desktop/   cdylib/staticlib (заглушка)
 └── LICENSE        MIT
 ```
 
