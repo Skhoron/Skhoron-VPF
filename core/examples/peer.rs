@@ -12,7 +12,7 @@
 use std::env;
 
 use skhoron_vbf_core::framing::{Frame, FrameType};
-use skhoron_vbf_core::handshake::{self, HandshakeMessage, PeerAuthenticity, HANDSHAKE_MSG_LEN};
+use skhoron_vbf_core::handshake::{self, HandshakeMessage, HANDSHAKE_MSG_LEN};
 use skhoron_vbf_core::identity::Identity;
 use skhoron_vbf_core::session::{OrderingGuarantee, Session};
 
@@ -62,27 +62,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let peer_msg = HandshakeMessage::decode(&peer_frame.payload)?;
 
-    // ВНИМАНИЕ: здесь мы доверяем pubkey, пришедшему в самом сообщении
-    // (TOFU — trust on first use), потому что peer не был известен заранее.
-    // В реальном форке ожидаемый pubkey должен приходить из DHT/конфига,
-    // а не из этого же соединения — иначе это не защита от MITM, только
-    // от пассивного прослушивания. Это осознанное упрощение примера.
-    let peer_identity_pubkey =
-        ed25519_dalek::VerifyingKey::from_bytes(&peer_msg.identity_pubkey)?;
-
-    let keys = handshake::finish(
-        state,
-        &peer_msg,
-        &peer_identity_pubkey,
-        // Явно TOFU: peer заранее не был известен, pubkey пришёл из этого
-        // же соединения. См. README — защищает от пассивного прослушивания,
-        // не от MITM на этапе первого знакомства.
-        PeerAuthenticity::TrustOnFirstUse,
-    )?;
+    // ВНИМАНИЕ: peer не был известен заранее, поэтому используем именно
+    // finish_tofu — по названию и по сигнатуре сразу видно, что это TOFU
+    // (trust on first use), а не проверенный из независимого источника
+    // pubkey. Раньше здесь был один finish() с параметром-меткой, который
+    // ни на что не влиял внутри библиотеки — теперь спутать пути физически
+    // нельзя, они разные функции с разными сигнатурами.
+    let (keys, accepted_peer_pubkey) = handshake::finish_tofu(state, &peer_msg)?;
     let mut session = Session::new(keys.tx, keys.rx, OrderingGuarantee::StrictInOrderTransport);
 
-    println!("Handshake завершён. Канал зашифрован (XChaCha20-Poly1305).");
-    println!("Peer Master-ID: {}", hex_encode(&peer_msg.identity_pubkey));
+    println!("Handshake завершён (TOFU!). Канал зашифрован (XChaCha20-Poly1305).");
+    println!("Принятый Peer Master-ID (не проверен независимо): {}", hex_encode(accepted_peer_pubkey.as_bytes()));
 
     // --- Обмен зашифрованными сообщениями ---
     let outgoing = b"privet ot skhoron-vbf base";
