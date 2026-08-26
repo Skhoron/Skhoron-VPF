@@ -29,22 +29,6 @@ pub const HANDSHAKE_MSG_LEN: usize = 32 + 32 + 64; // ephemeral_pubkey + identit
 const PROTOCOL_ID: &[u8] = b"skhoron-vbf-handshake";
 const PROTOCOL_VERSION: u8 = 1;
 
-/// Как вызывающий код получил ожидаемый pubkey собеседника. Это не решает
-/// проблему MITM само по себе, но делает выбор явным на уровне типов —
-/// нельзя случайно забыть, что TOFU не защищает от активного атакующего.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PeerAuthenticity {
-    /// Pubkey пришёл из независимого доверенного источника (заранее
-    /// обменянный контакт, подписанная запись DHT и т.п.) — защищает
-    /// от MITM при условии, что сам источник не скомпрометирован.
-    VerifiedOutOfBand,
-    /// Trust-on-first-use: pubkey был принят без независимой проверки
-    /// (например, из этого же соединения). Защищает только от пассивного
-    /// прослушивания уже установленного канала, НЕ от активного MITM
-    /// на этапе самого первого знакомства.
-    TrustOnFirstUse,
-}
-
 /// Сообщение, которым обмениваются стороны на старте.
 /// Кладётся в payload Frame::Handshake без дополнительной обёртки.
 pub struct HandshakeMessage {
@@ -154,31 +138,57 @@ pub fn start(identity: &Identity) -> (HandshakeState, HandshakeMessage) {
     (state, msg)
 }
 
-/// Шаг 2: получив сообщение собеседника, проверить подпись и завершить
-/// вычисление общих ключей.
+/// Шаг 2 (безопасный путь): собеседник заранее известен из независимого
+/// доверенного источника (заранее обменянный контакт, подписанная запись
+/// в DHT и т.п.). `expected_peer_pubkey` должен приходить НЕ из этого же
+/// соединения — иначе это не VerifiedOutOfBand, а TOFU с чужим названием
+/// (см. `finish_tofu` ниже и разбор в README).
 ///
-/// `authenticity` заставляет вызывающий код явно указать, откуда взялся
-/// `expected_peer_pubkey` — см. `PeerAuthenticity`. При `TrustOnFirstUse`
-/// функция всё равно отработает (это осознанно допустимый режим для
-/// демо/раннего этапа), но факт использования TOFU остаётся явным
-/// в вызывающем коде, а не спрятан внутри библиотеки.
-pub fn finish(
+/// Раньше был единственный `finish()` с параметром `PeerAuthenticity`,
+/// который ни на что не влиял внутри функции — тип создавал иллюзию
+/// разной строгости проверки, а по факту оба режима шли одним и тем же
+/// кодом. Теперь это два разных имени функции, чтобы вызывающий код было
+/// физически невозможно перепутать молча.
+pub fn finish_verified(
     state: HandshakeState,
     peer_msg: &HandshakeMessage,
     expected_peer_pubkey: &VerifyingKey,
-    _authenticity: PeerAuthenticity,
 ) -> Result<SessionKeys, VbfError> {
     if peer_msg.identity_pubkey != *expected_peer_pubkey.as_bytes() {
         return Err(VbfError::InvalidSignature);
     }
+    verify_and_derive(state, peer_msg, expected_peer_pubkey)
+}
 
+/// Шаг 2 (TOFU-путь, небезопасный на первом знакомстве): identity
+/// собеседника берётся из ЭТОГО ЖЕ сообщения, без независимой проверки.
+/// Защищает только от пассивного прослушивания уже установленного канала,
+/// НЕ от активного MITM в момент самого первого рукопожатия. Возвращает
+/// принятый pubkey вместе с ключами — вызывающий код обязан явно решить,
+/// что с ним делать (залогировать, показать пользователю для сверки
+/// отпечатка и т.п.), а не тихо довериться.
+pub fn finish_tofu(
+    state: HandshakeState,
+    peer_msg: &HandshakeMessage,
+) -> Result<(SessionKeys, VerifyingKey), VbfError> {
+    let peer_pubkey = VerifyingKey::from_bytes(&peer_msg.identity_pubkey)
+        .map_err(|_| VbfError::InvalidSignature)?;
+    let keys = verify_and_derive(state, peer_msg, &peer_pubkey)?;
+    Ok((keys, peer_pubkey))
+}
+
+fn verify_and_derive(
+    state: HandshakeState,
+    peer_msg: &HandshakeMessage,
+    peer_pubkey: &VerifyingKey,
+) -> Result<SessionKeys, VbfError> {
     let mut signed_material = Vec::with_capacity(PROTOCOL_ID.len() + 1 + 32);
     signed_material.extend_from_slice(PROTOCOL_ID);
     signed_material.push(PROTOCOL_VERSION);
     signed_material.extend_from_slice(&peer_msg.ephemeral_pubkey);
 
     let signature = Signature::from_bytes(&peer_msg.signature);
-    crypto::ed25519_verify(expected_peer_pubkey, &signed_material, &signature)?;
+    crypto::ed25519_verify(peer_pubkey, &signed_material, &signature)?;
 
     let peer_ephemeral_pubkey = X25519PublicKey::from(peer_msg.ephemeral_pubkey);
     let shared_secret = state.ephemeral_secret.diffie_hellman(&peer_ephemeral_pubkey);
@@ -192,7 +202,10 @@ pub fn finish(
     // Хэшируем transcript в фиксированный salt — сам transcript уже
     // включает protocol id/version/обе identity/оба ephemeral pubkey,
     // так что производные ключи привязаны ко всему контексту, а не
-    // только к in identity pubkeys, как было раньше.
+    // только к identity pubkeys, как было раньше. Подпись выше покрывает
+    // protocol_id+версию+собственный ephemeral собеседника — полную
+    // привязку ко всем четырём значениям транскрипта даёт именно HKDF,
+    // не сама Ed25519-подпись (уточнение к README, см. H5 в ревью).
     let mut hasher = Sha256::new();
     hasher.update(&transcript);
     let transcript_hash = hasher.finalize();
@@ -237,20 +250,8 @@ mod tests {
         let (state_a, msg_a) = start(&identity_a);
         let (state_b, msg_b) = start(&identity_b);
 
-        let keys_a = finish(
-            state_a,
-            &msg_b,
-            &identity_b.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
-        let keys_b = finish(
-            state_b,
-            &msg_a,
-            &identity_a.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
+        let keys_a = finish_verified(state_a, &msg_b, &identity_b.public_key()).unwrap();
+        let keys_b = finish_verified(state_b, &msg_a, &identity_a.public_key()).unwrap();
 
         assert_eq!(keys_a.tx.as_bytes(), keys_b.rx.as_bytes());
         assert_eq!(keys_b.tx.as_bytes(), keys_a.rx.as_bytes());
@@ -265,12 +266,7 @@ mod tests {
         let (state_a, _msg_a) = start(&identity_a);
         let (_state_b, msg_b) = start(&identity_b);
 
-        let result = finish(
-            state_a,
-            &msg_b,
-            &identity_mallory.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        );
+        let result = finish_verified(state_a, &msg_b, &identity_mallory.public_key());
         assert!(result.is_err());
     }
 
@@ -286,12 +282,23 @@ mod tests {
         msg_a.ephemeral_pubkey[0] ^= 0xFF; // подменили ephemeral после подписи
 
         let (state_b, _) = start(&Identity::generate());
-        let result = finish(
-            state_b,
-            &msg_a,
-            &identity_a.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        );
+        let result = finish_verified(state_b, &msg_a, &identity_a.public_key());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn finish_tofu_accepts_peer_and_returns_its_pubkey() {
+        let identity_a = Identity::generate();
+        let identity_b = Identity::generate();
+
+        let (state_a, msg_a) = start(&identity_a);
+        let (state_b, msg_b) = start(&identity_b);
+
+        let (keys_a, accepted_b_pubkey) = finish_tofu(state_a, &msg_b).unwrap();
+        let (keys_b, accepted_a_pubkey) = finish_tofu(state_b, &msg_a).unwrap();
+
+        assert_eq!(accepted_b_pubkey, identity_b.public_key());
+        assert_eq!(accepted_a_pubkey, identity_a.public_key());
+        assert_eq!(keys_a.tx.as_bytes(), keys_b.rx.as_bytes());
     }
 }
