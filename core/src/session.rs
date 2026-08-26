@@ -8,8 +8,10 @@
 use crate::crypto::{aead_decrypt, aead_encrypt, SymmetricKey, NONCE_LEN};
 use crate::error::VbfError;
 use crate::framing::{Frame, FrameType};
+use crate::VBF_VERSION;
 
 const COUNTER_LEN: usize = 8;
+const AAD_LEN: usize = 1 + 1 + COUNTER_LEN; // version + frame_type + counter
 
 /// Явное подтверждение того, какие гарантии даёт транспорт под Session.
 /// Session::new требует этот параметр — нельзя случайно подсунуть Session
@@ -47,15 +49,15 @@ impl Session {
     }
 
     /// Шифрует plaintext и заворачивает в Frame, готовый к отправке.
-    /// Счётчик кладётся явным префиксом в payload И передаётся как AAD —
-    /// раньше AAD был пустым, из-за чего counter не был криптографически
-    /// аутентифицирован (получатель отклонял бы несовпадение только по
-    /// логике сравнения, а не потому что подделка ломает tag). Теперь
-    /// подмена counter ломает Poly1305-тег напрямую.
+    /// AAD = VBF_VERSION || FrameType::Data-байт || counter — раньше туда
+    /// входил только counter (H4 в ревью): версия и тип кадра тоже теперь
+    /// аутентифицированы, ciphertext нельзя перенести в кадр другой версии
+    /// или другого типа без слома Poly1305-тега.
     pub fn encrypt_frame(&mut self, plaintext: &[u8]) -> Result<Frame, VbfError> {
         let nonce = counter_to_nonce(self.tx_counter);
         let counter_bytes = self.tx_counter.to_be_bytes();
-        let ciphertext = aead_encrypt(&self.tx_key, &nonce, plaintext, &counter_bytes)?;
+        let aad = build_aad(&counter_bytes);
+        let ciphertext = aead_encrypt(&self.tx_key, &nonce, plaintext, &aad)?;
 
         let mut payload = Vec::with_capacity(COUNTER_LEN + ciphertext.len());
         payload.extend_from_slice(&counter_bytes);
@@ -96,12 +98,8 @@ impl Session {
         }
 
         let nonce = counter_to_nonce(counter);
-        let plaintext = aead_decrypt(
-            &self.rx_key,
-            &nonce,
-            &frame.payload[COUNTER_LEN..],
-            &counter_bytes,
-        )?;
+        let aad = build_aad(&counter_bytes);
+        let plaintext = aead_decrypt(&self.rx_key, &nonce, &frame.payload[COUNTER_LEN..], &aad)?;
 
         self.rx_counter = self
             .rx_counter
@@ -118,10 +116,18 @@ fn counter_to_nonce(counter: u64) -> [u8; NONCE_LEN] {
     nonce
 }
 
+fn build_aad(counter_bytes: &[u8; COUNTER_LEN]) -> [u8; AAD_LEN] {
+    let mut aad = [0u8; AAD_LEN];
+    aad[0] = VBF_VERSION;
+    aad[1] = FrameType::Data.to_u8();
+    aad[2..].copy_from_slice(counter_bytes);
+    aad
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handshake::{finish, start, PeerAuthenticity};
+    use crate::handshake::{finish_verified, start};
     use crate::identity::Identity;
 
     #[test]
@@ -132,20 +138,8 @@ mod tests {
         let (state_a, msg_a) = start(&identity_a);
         let (state_b, msg_b) = start(&identity_b);
 
-        let keys_a = finish(
-            state_a,
-            &msg_b,
-            &identity_b.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
-        let keys_b = finish(
-            state_b,
-            &msg_a,
-            &identity_a.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
+        let keys_a = finish_verified(state_a, &msg_b, &identity_b.public_key()).unwrap();
+        let keys_b = finish_verified(state_b, &msg_a, &identity_a.public_key()).unwrap();
 
         let mut session_a = Session::new(keys_a.tx, keys_a.rx, OrderingGuarantee::StrictInOrderTransport);
         let mut session_b = Session::new(keys_b.tx, keys_b.rx, OrderingGuarantee::StrictInOrderTransport);
@@ -168,20 +162,8 @@ mod tests {
         let (state_a, msg_a) = start(&identity_a);
         let (state_b, msg_b) = start(&identity_b);
 
-        let keys_a = finish(
-            state_a,
-            &msg_b,
-            &identity_b.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
-        let keys_b = finish(
-            state_b,
-            &msg_a,
-            &identity_a.public_key(),
-            PeerAuthenticity::VerifiedOutOfBand,
-        )
-        .unwrap();
+        let keys_a = finish_verified(state_a, &msg_b, &identity_b.public_key()).unwrap();
+        let keys_b = finish_verified(state_b, &msg_a, &identity_a.public_key()).unwrap();
 
         let mut session_a = Session::new(keys_a.tx, keys_a.rx, OrderingGuarantee::StrictInOrderTransport);
         let mut session_b = Session::new(keys_b.tx, keys_b.rx, OrderingGuarantee::StrictInOrderTransport);
