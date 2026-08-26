@@ -29,7 +29,10 @@ pub enum FrameType {
 }
 
 impl FrameType {
-    fn to_u8(self) -> u8 {
+    /// pub(crate), не pub — наружу тип отдаётся только через FrameType-enum,
+    /// не как голый байт, чтобы session.rs мог положить его в AAD (см. H4
+    /// в ревью), но внешний код не мог обойти валидацию Extension-диапазона.
+    pub(crate) fn to_u8(self) -> u8 {
         match self {
             FrameType::Handshake => 0x01,
             FrameType::Data => 0x02,
@@ -48,12 +51,28 @@ impl FrameType {
             other => FrameType::Extension(other),
         }
     }
+
+    /// Единственный проверенный способ создать Extension-тип для отправки.
+    /// `FrameType::Extension(v)` как конструктор тоже публичен (нельзя
+    /// спрятать поле tuple-варианта в Rust без смены на struct-вариант),
+    /// но `encode()` дополнительно проверяет диапазон при сериализации —
+    /// так что даже обход этого конструктора не даст отправить кадр
+    /// с зарезервированным (0x00-0x7F) значением в Extension.
+    pub fn extension(value: u8) -> Result<Self, VbfError> {
+        if (0x80..=0xFF).contains(&value) {
+            Ok(FrameType::Extension(value))
+        } else {
+            Err(VbfError::MalformedFrame(
+                "extension frame type must be in 0x80..=0xFF",
+            ))
+        }
+    }
 }
 
 /// Один TLV-кадр: version(1) | type(1) | length(4, big-endian) | value(N)
 #[derive(Clone, Debug)]
 pub struct Frame {
-    pub version: u8,
+    version: u8,
     pub frame_type: FrameType,
     pub payload: Vec<u8>,
 }
@@ -75,9 +94,27 @@ impl Frame {
         }
     }
 
+    /// Версия не мутируется после создания (поле приватное) — раньше
+    /// `pub version: u8` можно было выставить в произвольное значение
+    /// после `Frame::new()` и получить кадр с "видом" другой версии,
+    /// не проходя через инвариант, который задаёт сам конструктор.
+    pub fn version(&self) -> u8 {
+        self.version
+    }
+
     pub fn encode(&self) -> Result<BytesMut, VbfError> {
         if self.payload.len() > MAX_FRAME_SIZE {
             return Err(VbfError::MalformedFrame("payload exceeds MAX_FRAME_SIZE"));
+        }
+        // Зарезервированный диапазон (0x00-0x7F) не должен уходить на
+        // провод как Extension — это ломало бы совместимость с будущими
+        // именованными FrameType в этом диапазоне.
+        if let FrameType::Extension(v) = self.frame_type {
+            if !(0x80..=0xFF).contains(&v) {
+                return Err(VbfError::MalformedFrame(
+                    "extension frame type must be in 0x80..=0xFF",
+                ));
+            }
         }
         // payload.len() гарантированно помещается в u32 после проверки выше —
         // без этой проверки usize->u32 на 64-бит системах мог молча обрезаться.
@@ -167,5 +204,20 @@ mod tests {
             Frame::decode(&mut buf),
             Err(VbfError::UnsupportedVersion(99))
         ));
+    }
+
+    #[test]
+    fn extension_constructor_rejects_reserved_range() {
+        assert!(FrameType::extension(0x02).is_err()); // 0x02 == Data, зарезервировано
+        assert!(FrameType::extension(0x80).is_ok());
+    }
+
+    #[test]
+    fn encode_rejects_extension_in_reserved_range() {
+        // Обходим FrameType::extension() напрямую через tuple-конструктор —
+        // именно это encode() должен ловить сам, а не полагаться на то,
+        // что вызывающий код использовал validated-конструктор.
+        let frame = Frame::new(FrameType::Extension(0x02), vec![]);
+        assert!(frame.encode().is_err());
     }
 }
