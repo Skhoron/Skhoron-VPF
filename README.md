@@ -1,131 +1,125 @@
 # Skhoron-VBF (VPN Base Framework)
 
-Платформонезависимый каркас для VPN-протоколов с балансом
-приватность/скорость. **Не готовый VPN-продукт** — база, поверх которой
-форкеры добавляют свой протокол, свою обфускацию, своё всё.
+A platform-independent framework for VPN protocols with a balance between
+privacy and speed. Not a ready-made VPN product — a foundation on top of
+which forkers add their own protocol, their own obfuscation, their own everything.
 
-Аналогия: как одна transformer-архитектура лежит в основе разных LLM —
-здесь один криптографический/сетевой каркас лежит в основе разных VPN.
+Analogy: just as one transformer architecture underlies different LLMs,
+here one cryptographic/network framework underlies different VPNs.
 
-## Что уже есть (Base) — и реально работает
+What is already there (Base) — and actually works
 
-- `core/crypto.rs` — примитивы (XChaCha20-Poly1305, X25519, Ed25519, HKDF,
-  Argon2id). `SymmetricKey` не Clone (секрет не должен размножаться), байты
-  доступны только внутри крейта (`pub(crate)`), не через публичный FFI.
-- `core/framing.rs` — TLV framing с полем версии и жёстким `MAX_FRAME_SIZE`
-  (16 MiB) — и на encode, и на decode, включая проверку до аллокации буфера.
-- `core/identity.rs` — Identity / Master-ID = SHA-256(Ed25519 pubkey)
-- `core/handshake.rs` — минимальный handshake: X25519 + Ed25519, подпись
-  покрывает protocol_id/версию/ephemeral, HKDF на сессионные ключи берёт
-  salt из хэша полного transcript (protocol_id + версия + обе identity +
-  оба ephemeral pubkey). Разделён на два явных пути вместо одного `finish()`
-  с decorативным флагом: `finish_verified()` — pubkey собеседника пришёл из
-  независимого источника; `finish_tofu()` — pubkey берётся из самого
-  сообщения (trust-on-first-use), возвращает принятый ключ, чтобы
-  вызывающий код не мог тихо забыть, что доверился без проверки.
-- `core/session.rs` — шифрование/дешифрование кадров, AAD теперь =
-  VBF_VERSION + FrameType-байт + counter (не только counter) — подмена
-  версии или типа кадра тоже рвёт Poly1305-тег. `OrderingGuarantee` —
-  явный параметр конструктора против случайного использования поверх UDP/QUIC.
-- `core/examples/peer.rs` — живой пример: два процесса по TCP реально
-  соединяются, делают handshake и обмениваются зашифрованными сообщениями.
-  Запуск:
-  ```
+- "core/crypto.rs" — primitives (XChaCha20-Poly1305, X25519, Ed25519, HKDF,
+  Argon2id). "SymmetricKey" is not Clone (the secret must not be duplicated), bytes
+  are accessible only within the crate ("pub(crate)"), not through public FFI.
+- "core/framing.rs" — TLV framing with a version field and a strict "MAX_FRAME_SIZE"
+  (16 MiB) — on both encode and decode, including a check before buffer allocation.
+- "core/identity.rs" — Identity / Master-ID = SHA-256(Ed25519 pubkey)
+- "core/handshake.rs" — minimal handshake: X25519 + Ed25519, the signature
+  covers protocol_id/version/ephemeral, HKDF for session keys takes its
+  salt from the hash of the full transcript (protocol_id + version + both identities +
+  both ephemeral pubkeys). It is split into two explicit paths instead of one "finish()"
+  with a decorative flag: "finish_verified()" — the peer's pubkey came from
+  an independent source; "finish_tofu()" — the pubkey is taken from the message itself
+  (trust-on-first-use), returns the accepted key so that the calling code
+  cannot silently forget that it trusted the key without verification.
+- "core/session.rs" — frame encryption/decryption, AAD is now =
+  VBF_VERSION + FrameType byte + counter (not just the counter) — tampering
+  with the version or frame type also breaks the Poly1305 tag. "OrderingGuarantee" —
+  an explicit constructor parameter to prevent accidental use over UDP/QUIC.
+- "core/examples/peer.rs" — a working example: two processes actually
+  connect over TCP, perform a handshake, and exchange encrypted messages.
+  Run:
   cargo run --example peer -- server 127.0.0.1:9000
-  cargo run --example peer -- client 127.0.0.1:9000
-  ```
-- `net/` — заготовка на rust-libp2p (Kademlia DHT). `BootstrapNode.peer_id`
-  теперь обязательный (не `Option`) — доверенная bootstrap-нода без
-  проверки identity открывает подмену узла. Есть отдельный явно названный
-  `UntrustedDiscoveryNode` для случаев, где риск осознанно принят.
-  Адреса — типизированный `Multiaddr`, не `String`. `MemoryStore` — известное
-  ограничение текущей заглушки (DHT не переживает рестарт), персистентный
-  store — следующий шаг перед реальным использованием.
+cargo run --example peer -- client 127.0.0.1:9000
+- "net/" — a rust-libp2p-based scaffold (Kademlia DHT). "BootstrapNode.peer_id"
+  is now mandatory (not "Option") — a trusted bootstrap node without
+  identity verification allows node impersonation. There is a separate, explicitly named
+  "UntrustedDiscoveryNode" for cases where the risk is knowingly accepted.
+  Addresses are typed "Multiaddr", not "String". "MemoryStore" is a known
+  limitation of the current stub (the DHT does not survive restarts); a persistent
+  store is the next step before real-world use.
 
-## Что было убрано
+What was removed
 
-`ffi-android/` и `ffi-desktop/` убраны из workspace: там были только
-TODO-заглушки без единой экспортируемой функции — то есть структура без
-функциональной ценности. Возврат — когда появится реальный API поверх core.
+"ffi-android/" and "ffi-desktop/" were removed from the workspace: they contained only
+TODO stubs without a single exported function — that is, a structure with no
+functional value. They will be brought back when a real API is available on top of core.
 
-## Чего сознательно НЕТ в базе
+What is deliberately NOT included in the base
 
-Это не забыто — это осознанная граница "каркас vs форк":
+This is not forgotten — it is a deliberate boundary between "framework vs fork":
 
-- Peer discovery через DHT в handshake-примере — там peer передаётся
-  вручную (IP:port), реальный discovery — задача `net/` + форка
-- Sliding-window anti-replay, UDP/QUIC-транспорт — протокольная логика форка
-  (`OrderingGuarantee` сейчас поддерживает только строгий порядок)
-- Обфускация трафика (Hysteria2-style, mixnet) — Standard/Pro тиры
-- Генерация паролей/PIN, UI, конфигурация продакшен bootstrap-нод
+- Peer discovery through DHT in the handshake example — the peer is passed
+  manually (IP:port); actual discovery is the responsibility of "net/" + the fork
+- Sliding-window anti-replay, UDP/QUIC transport — protocol logic belongs to the fork
+  ("OrderingGuarantee" currently supports strict ordering only)
+- Traffic obfuscation (Hysteria2-style, mixnet) — Standard/Pro tiers
+- Password/PIN generation, UI, production bootstrap-node configuration
 
-Пример (`peer.rs`) использует `handshake::finish_tofu()` — это защищает
-только от пассивного прослушивания, не от MITM на этапе первого
-знакомства (принятый pubkey печатается с явной пометкой "не проверен
-независимо"). Настоящая защита требует `handshake::finish_verified()` с
-pubkey из независимого источника (DHT, заранее обменянный контакт) —
-это уже следующий шаг для форка, не часть голой базы.
+The example ("peer.rs") uses "handshake::finish_tofu()" — this protects
+only against passive eavesdropping, not against MITM attacks during the first
+encounter (the accepted pubkey is printed with an explicit "not independently
+verified" label). Real protection requires "handshake::finish_verified()" with a
+pubkey from an independent source (DHT, a contact exchanged in advance) —
+this is the next step for a fork, not part of the bare framework.
 
-## Известные ограничения, не закрытые в этой версии
+Known limitations not addressed in this version
 
-Зафиксировано честно, чтобы не создавать иллюзию большей готовности:
+These are documented honestly to avoid creating the illusion of greater readiness:
 
-- `FrameType::extension(u8)` — единственный проверенный конструктор для
-  Extension-типов (0x80-0xFF), но `FrameType::Extension(v)` как
-  tuple-вариант остаётся публичным конструктором в обход валидации;
-  `encode()` ловит это перед отправкой на провод, но конструирование
-  невалидного значения в памяти всё ещё возможно
-- Нет rekey/key-epoch API — при исчерпании counter (`u64`, на практике
-  недостижимо в разумное время) Session просто перестаёт работать,
-  пересоздание сессии — на вызывающем коде
-- Нет теста на low-order/invalid X25519 public key — `x25519-dalek`
-  делает clamping по спецификации, но отдельного теста на этот случай
-  в этой версии нет
-- Streaming-парсер (`NeedMoreData` vs `Malformed`) не реализован —
-  `core/examples/peer.rs` читает фрейм вручную через `read_exact`,
-  общего `FrameDecoder` для стрима в `core` нет
-- CI (fmt/clippy/test/audit) не настроен
+- "FrameType::extension(u8)" is the only validated constructor for
+  Extension types (0x80-0xFF), but "FrameType::Extension(v)" as a
+  tuple variant remains a public constructor that bypasses validation;
+  "encode()" catches this before sending data over the wire, but constructing
+  an invalid value in memory is still possible
+- No rekey/key-epoch API — when the counter ("u64", practically unreachable
+  within a reasonable time) is exhausted, the Session simply stops working;
+  recreating the session is the responsibility of the calling code
+- No test for low-order/invalid X25519 public keys — "x25519-dalek"
+  performs clamping according to the specification, but there is no separate
+  test for this case in this version
+- Streaming parser ("NeedMoreData" vs "Malformed") is not implemented —
+  "core/examples/peer.rs" reads frames manually using "read_exact";
+  there is no general-purpose "FrameDecoder" for streams in "core"
+- CI (fmt/clippy/test/audit) is not configured
 
-## Принцип
+Principle
 
-Крипто-примитивы и DHT — **аудированные библиотеки** (RustCrypto,
-rust-libp2p), не самописные. Баг в примитиве размножится во все форки
-одновременно, поэтому здесь надёжность важнее оригинальности.
-Протокол/фичи сверху — зона форкеров, там можно и нужно экспериментировать.
+Cryptographic primitives and DHT are audited libraries (RustCrypto,
+rust-libp2p), not custom implementations. A bug in a primitive would spread
+to all forks at once, so reliability matters more than originality here.
+The protocol/features built on top are the forkers' domain, where experimentation
+is both possible and necessary.
 
-## Стек
+Stack
 
-| Слой | Крейт | Лицензия |
-|---|---|---|
-| AEAD | `chacha20poly1305` | MIT/Apache-2.0 |
-| ECDH | `x25519-dalek` | MIT |
-| Подписи | `ed25519-dalek` | MIT |
-| KDF | `hkdf`, `argon2` | MIT/Apache-2.0 |
-| DHT | `libp2p` (kad) | MIT/Apache-2.0 |
+Layer| Crate| License
+AEAD| "chacha20poly1305"| MIT/Apache-2.0
+ECDH| "x25519-dalek"| MIT
+Signatures| "ed25519-dalek"| MIT
+KDF| "hkdf", "argon2"| MIT/Apache-2.0
+DHT| "libp2p" (kad)| MIT/Apache-2.0
 
-Никаких GPL/AGPL-зависимостей в этом репозитории. Если нужен
-AGPL-компонент экосистемы (self-hosted сервисы) — он живёт отдельным
-репозиторием/процессом, общается по сети, не линкуется напрямую.
-FFI (Android/desktop) пока не в этом репозитории — см. "Что было убрано".
+There are no GPL/AGPL dependencies in this repository. If an AGPL component
+of the ecosystem is needed (self-hosted services), it lives in a separate
+repository/process, communicates over the network, and is not linked directly.
+FFI (Android/desktop) is not in this repository yet — see "What was removed".
 
-## Структура
+Structure
 
-```
 Skhoron-VBF/
-├── core/          crypto, framing, handshake, session, identity — платформонезависимо
-│   └── examples/  peer.rs — живой TCP-пример handshake+шифрования
-├── net/           libp2p DHT заготовка
+├── core/          crypto, framing, handshake, session, identity — platform-independent
+│   └── examples/  peer.rs — working TCP example of handshake+encryption
+├── net/           libp2p DHT scaffold
 └── LICENSE        MIT
-```
 
-## Сборка
+Building
 
-```
 cargo build --workspace
 cargo test -p skhoron-vbf-core
-```
 
-## Статус
+Status
 
-Ранняя стадия. `core` компилируется и содержит рабочие крипто-примитивы
-и framing с тестами. Handshake/протокол — не реализован, следующий шаг.
+Early stage. "core" compiles and contains working cryptographic primitives
+and framing with tests. Handshake/protocol — not implemented, next step.
